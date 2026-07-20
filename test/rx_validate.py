@@ -2,6 +2,7 @@
 """Loopback validation for [report_fec_rx]: server+client through a lossy UDP
 proxy on 127.0.0.1. No loss -> no recovery; moderate loss -> recovery with a
 near-zero delivery gap; heavy loss -> failed groups. Exit 0 iff all pass."""
+import os
 import random
 import re
 import signal
@@ -97,6 +98,31 @@ def spawn(args, logfile):
     return subprocess.Popen(args, stdout=logfile, stderr=subprocess.STDOUT)
 
 
+def terminate(proc):
+    """Best-effort SIGTERM, escalating to SIGKILL, that never raises.
+    Handles one process fully independently of any other so a hung
+    process can't skip teardown of its sibling."""
+    if proc is None:
+        return
+    try:
+        proc.send_signal(signal.SIGTERM)
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def last_rx_counters(path):
     text = ANSI.sub("", open(path, encoding="utf-8", errors="replace").read())
     hits = RX_RE.findall(text)
@@ -114,47 +140,69 @@ def run_case(drop):
     proxy = LossyProxy(proxy_port, server_port, drop); proxy.start()
     slog = tempfile.NamedTemporaryFile("w", suffix=".server.log", delete=False)
     clog = tempfile.NamedTemporaryFile("w", suffix=".client.log", delete=False)
-    server = spawn([BIN, "-s", "-l", f"127.0.0.1:{server_port}",
-                    "-r", f"127.0.0.1:{sink_port}", "-f8:4", "--mode", "0",
-                    "--report", "1", "-k", KEY], slog)
-    time.sleep(0.3)
-    client = spawn([BIN, "-c", "-l", f"127.0.0.1:{client_port}",
-                    "-r", f"127.0.0.1:{proxy_port}", "-f8:4", "--mode", "0",
-                    "--report", "1", "-k", KEY], clog)
-    time.sleep(0.5)
-    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    for _ in range(N_PKTS):
-        tx.sendto(PAYLOAD, ("127.0.0.1", client_port))
-        time.sleep(0.002)
-    time.sleep(3.0)  # drain + at least one more report tick
-    for p in (client, server):
-        p.send_signal(signal.SIGTERM)
-        p.wait(timeout=5)
-    proxy.stop_flag = True
-    sink.stop_flag = True
+    server = None
+    client = None
+    try:
+        server = spawn([BIN, "-s", "-l", f"127.0.0.1:{server_port}",
+                        "-r", f"127.0.0.1:{sink_port}", "-f8:4", "--mode", "0",
+                        "--report", "1", "-k", KEY], slog)
+        time.sleep(0.3)
+        client = spawn([BIN, "-c", "-l", f"127.0.0.1:{client_port}",
+                        "-r", f"127.0.0.1:{proxy_port}", "-f8:4", "--mode", "0",
+                        "--report", "1", "-k", KEY], clog)
+        time.sleep(0.5)
+        tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        for _ in range(N_PKTS):
+            tx.sendto(PAYLOAD, ("127.0.0.1", client_port))
+            time.sleep(0.002)
+        time.sleep(3.0)  # drain + at least one more report tick
+    finally:
+        # each process is torn down independently: a hang or exception in
+        # one must not prevent the other's SIGTERM/SIGKILL.
+        terminate(client)
+        terminate(server)
+        proxy.stop_flag = True
+        sink.stop_flag = True
     c = last_rx_counters(slog.name)
     assert c is not None, f"no [report_fec_rx] line in {slog.name}"
-    return c, sink.count
+    return c, sink.count, (slog.name, clog.name)
+
+
+def cleanup_logs_if_passed(failures, before_count, logs):
+    """Unlink a case's temp log files iff that case added no new failures.
+    Logs from a failing case are left on disk for debugging."""
+    if len(failures) == before_count:
+        for path in logs:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
 
 
 def main():
     failures = []
 
-    c, delivered = run_case(0.0)
+    before = len(failures)
+    c, delivered, logs = run_case(0.0)
     print(f"drop=0%   sink={delivered}/{N_PKTS} counters={c}")
     if c["pkt_rec"] != 0: failures.append("0%: expected pkt_rec==0")
     if c["grp_fail"] != 0: failures.append("0%: expected grp_fail==0")
     if c["pkt_ok"] < N_PKTS * 0.99: failures.append("0%: pkt_ok below sent count")
+    cleanup_logs_if_passed(failures, before, logs)
 
-    c, delivered = run_case(0.15)
+    before = len(failures)
+    c, delivered, logs = run_case(0.15)
     print(f"drop=15%  sink={delivered}/{N_PKTS} counters={c}")
     if c["pkt_rec"] == 0: failures.append("15%: expected pkt_rec>0")
     if delivered < N_PKTS * 0.95: failures.append("15%: FEC should hold delivery >=95%")
+    cleanup_logs_if_passed(failures, before, logs)
 
-    c, delivered = run_case(0.45)
+    before = len(failures)
+    c, delivered, logs = run_case(0.45)
     print(f"drop=45%  sink={delivered}/{N_PKTS} counters={c}")
     if c["grp_fail"] == 0: failures.append("45%: expected grp_fail>0")
     if c["shard_lost"] == 0: failures.append("45%: expected shard_lost>0")
+    cleanup_logs_if_passed(failures, before, logs)
 
     if failures:
         print("FAIL:\n  " + "\n  ".join(failures))
