@@ -130,14 +130,19 @@ def last_rx_counters(path):
         return None
     keys = ("pkt_ok", "pkt_rec", "grp_ok", "grp_rec", "grp_fail",
             "shard_lost", "par_waste")
+    # counters are cumulative for the process lifetime, so the last report
+    # line already holds the final total -- do not sum across hits, that
+    # would multiply-count every earlier interval's cumulative snapshot.
     return dict(zip(keys, (int(v) for v in hits[-1])))
 
 
 def run_case(drop):
     sink_port, server_port, proxy_port, client_port = (
         free_port(), free_port(), free_port(), free_port())
-    sink = Sink(sink_port); sink.start()
-    proxy = LossyProxy(proxy_port, server_port, drop); proxy.start()
+    sink = Sink(sink_port)
+    sink.start()
+    proxy = LossyProxy(proxy_port, server_port, drop)
+    proxy.start()
     slog = tempfile.NamedTemporaryFile("w", suffix=".server.log", delete=False)
     clog = tempfile.NamedTemporaryFile("w", suffix=".client.log", delete=False)
     server = None
@@ -185,23 +190,32 @@ def main():
     before = len(failures)
     c, delivered, logs = run_case(0.0)
     print(f"drop=0%   sink={delivered}/{N_PKTS} counters={c}")
-    if c["pkt_rec"] != 0: failures.append("0%: expected pkt_rec==0")
-    if c["grp_fail"] != 0: failures.append("0%: expected grp_fail==0")
-    if c["pkt_ok"] < N_PKTS * 0.99: failures.append("0%: pkt_ok below sent count")
+    if c["pkt_rec"] != 0:
+        failures.append("0%: expected pkt_rec==0")
+    if c["grp_fail"] != 0:
+        failures.append("0%: expected grp_fail==0")
+    if c["pkt_ok"] < N_PKTS * 0.99:
+        failures.append("0%: pkt_ok below sent count")
+    if delivered < N_PKTS * 0.99:
+        failures.append("0%: sink delivery below 99%")
     cleanup_logs_if_passed(failures, before, logs)
 
     before = len(failures)
     c, delivered, logs = run_case(0.15)
     print(f"drop=15%  sink={delivered}/{N_PKTS} counters={c}")
-    if c["pkt_rec"] == 0: failures.append("15%: expected pkt_rec>0")
-    if delivered < N_PKTS * 0.95: failures.append("15%: FEC should hold delivery >=95%")
+    if c["pkt_rec"] == 0:
+        failures.append("15%: expected pkt_rec>0")
+    if delivered < N_PKTS * 0.95:
+        failures.append("15%: FEC should hold delivery >=95%")
     cleanup_logs_if_passed(failures, before, logs)
 
     before = len(failures)
     c, delivered, logs = run_case(0.45)
     print(f"drop=45%  sink={delivered}/{N_PKTS} counters={c}")
-    if c["grp_fail"] == 0: failures.append("45%: expected grp_fail>0")
-    if c["shard_lost"] == 0: failures.append("45%: expected shard_lost>0")
+    if c["grp_fail"] == 0:
+        failures.append("45%: expected grp_fail>0")
+    if c["shard_lost"] == 0:
+        failures.append("45%: expected shard_lost>0")
     cleanup_logs_if_passed(failures, before, logs)
 
     if failures:
