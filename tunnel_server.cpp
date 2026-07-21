@@ -69,6 +69,7 @@ void data_from_remote_or_fec_timeout_or_conn_timer(conn_info_t &conn_info, fd64_
         }
 
         conn_info.stat.report_as_server(addr);
+        conn_info.fec_decode_manager.report_rx_stats();
         return;
     } else if (mode == is_from_remote) {
         if (!fd_manager.exist(fd64))  // fd64 has been closed

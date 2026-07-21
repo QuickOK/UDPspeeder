@@ -382,6 +382,15 @@ struct fec_group_t {
     // int data_counter=0;
     map<int, int> group_mp;
 };
+struct fec_rx_counters_t {
+    u64_t pkt_ok = 0;      // original packets delivered from groups needing no parity
+    u64_t pkt_rec = 0;     // original packets recovered via Reed-Solomon
+    u64_t grp_ok = 0;      // groups completed with zero parity consumed
+    u64_t grp_rec = 0;     // groups completed only thanks to parity
+    u64_t grp_fail = 0;    // groups evicted with fewer shards than data_num
+    u64_t shard_lost = 0;  // missing data shards summed over failed groups
+    u64_t par_waste = 0;   // parity shards received but not needed
+};
 class fec_decode_manager_t : not_copy_able_t {
     anti_replay_t anti_replay;
     fec_data_t *fec_data = 0;
@@ -397,6 +406,9 @@ class fec_decode_manager_t : not_copy_able_t {
 
     char *output_s_arr_buf[max_fec_packet_num + 100];  // only for type=1,for type=0 the buf inside blot_t is used
     int output_len_arr_buf[max_fec_packet_num + 100];  // same
+
+    fec_rx_counters_t rx_counters;
+    u64_t last_rx_report_time = 0;
 
    public:
     fec_decode_manager_t() {
@@ -432,6 +444,9 @@ class fec_decode_manager_t : not_copy_able_t {
     // int re_init();
     int input(char *s, int len);
     int output(int &n, char **&s_arr, int *&len_arr);
+
+    const fec_rx_counters_t &get_rx_counters() const { return rx_counters; }
+    void report_rx_stats();
 };
 
 #endif /* FEC_MANAGER_H_ */

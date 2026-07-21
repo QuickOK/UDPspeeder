@@ -23,6 +23,7 @@ fec_parameter_t g_fec_par;
 int debug_fec_enc = 0;
 int debug_fec_dec = 0;
 // int dynamic_update_fec=1;
+extern int report_interval;
 
 const int encode_fast_send = 1;
 const int decode_fast_send = 1;
@@ -516,6 +517,8 @@ int fec_decode_manager_t::input(char *s, int len) {
     }
 
     if (mp[seq].fec_done != 0) {
+        if (mp[seq].data_num > 0 && inner_index >= mp[seq].data_num)
+            rx_counters.par_waste++;  // parity for an already-completed group
         mylog(log_debug, "fec already done, ignore, seq=%u\n", seq);
         return -1;
     }
@@ -562,6 +565,11 @@ int fec_decode_manager_t::input(char *s, int len) {
             int cnt = tmp_it->second.group_mp.size();
 
             if (cnt < x) {
+                rx_counters.grp_fail++;
+                int data_got = 0;
+                for (auto it2 = tmp_it->second.group_mp.begin(); it2 != tmp_it->second.group_mp.end(); ++it2)
+                    if (it2->first < x) data_got++;
+                rx_counters.shard_lost += (u64_t)(x - data_got);
                 if (debug_fec_dec)
                     mylog(log_debug, "[dec][failed]seq=%08x x=%d y=%d cnt=%d\n", tmp_seq, x, y, cnt);
                 else
@@ -650,6 +658,13 @@ int fec_decode_manager_t::input(char *s, int len) {
             }
             assert(ready_for_output == 0);
             ready_for_output = 1;
+            if (y_got > 0) {                       // mode 0: parity consumed <=> data shards were missing
+                rx_counters.grp_rec++;
+                rx_counters.pkt_rec += (u64_t)output_n;
+            } else {
+                rx_counters.grp_ok++;
+                rx_counters.pkt_ok += (u64_t)output_n;
+            }
             anti_replay.set_invaild(seq);
         } else  // type==1
         {
@@ -737,6 +752,24 @@ int fec_decode_manager_t::input(char *s, int len) {
             if (fec_result_ok) {
                 output_n = group_data_num;
 
+                int missing = group_data_num - x_got;
+                if (missing > 0) {
+                    rx_counters.grp_rec++;
+                    rx_counters.pkt_rec += (u64_t)missing;
+                } else {
+                    rx_counters.grp_ok++;
+                }
+                if (decode_fast_send) {
+                    // earlier clean arrivals were counted at the fast path; only the
+                    // packet that just completed the group is new — and only if it
+                    // was a data packet (mode-1 data packets carry data_num==0)
+                    if (data_num == 0) rx_counters.pkt_ok++;
+                } else {
+                    rx_counters.pkt_ok += (u64_t)x_got;
+                }
+                int spare = y_got - (missing > 0 ? missing : 0);
+                if (spare > 0) rx_counters.par_waste += (u64_t)spare;
+
                 if (decode_fast_send) {
                     output_n = missed_packet_counter;
                     for (int i = 0; i < missed_packet_counter; i++) {
@@ -772,6 +805,7 @@ int fec_decode_manager_t::input(char *s, int len) {
                 output_len_arr = output_len_arr_buf;
 
                 ready_for_output = 1;
+                rx_counters.pkt_ok++;
             }
         }
     }
@@ -794,4 +828,14 @@ int fec_decode_manager_t::output(int &n, char **&s_arr, int *&len_arr) {
         len_arr = output_len_arr;
     }
     return 0;
+}
+void fec_decode_manager_t::report_rx_stats() {
+    if (report_interval == 0) return;
+    u64_t now = get_current_time();
+    if (now - last_rx_report_time <= u64_t(report_interval) * 1000) return;
+    last_rx_report_time = now;
+    mylog(log_info,
+          "[report_fec_rx]pkt_ok:%llu pkt_rec:%llu grp_ok:%llu grp_rec:%llu grp_fail:%llu shard_lost:%llu par_waste:%llu\n",
+          rx_counters.pkt_ok, rx_counters.pkt_rec, rx_counters.grp_ok, rx_counters.grp_rec,
+          rx_counters.grp_fail, rx_counters.shard_lost, rx_counters.par_waste);
 }
